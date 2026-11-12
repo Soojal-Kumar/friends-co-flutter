@@ -166,6 +166,6 @@ Future<void> form(BuildContext context,Store s,String type) async {
        await s.persist();
        if(ctx.mounted)Navigator.pop(ctx);
      },child:const Padding(padding:EdgeInsets.all(13),child:Text('Save Record'))),
-   ])))));
+   ]))))));
 }
 Widget field(String title,TextEditingController c,{bool number=false})=>Padding(padding:const EdgeInsets.only(bottom:12),child:TextFormField(controller:c,keyboardType:number?const TextInputType.numberWithOptions(decimal:true):TextInputType.text,decoration:InputDecoration(labelText:title,border:const OutlineInputBorder(),contentPadding:const EdgeInsets.symmetric(horizontal:13,vertical:15))));
