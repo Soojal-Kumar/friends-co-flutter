@@ -1,15 +1,18 @@
 name: friends_co
-description: FRIENDS & CO. wholesale management Flutter test app
+description: FRIENDS & CO. Wholesale Manager
 publish_to: none
-version: 0.2.0+2
+version: 0.3.0+3
 environment:
   sdk: '>=3.4.0 <4.0.0'
 dependencies:
   flutter:
     sdk: flutter
   shared_preferences: ^2.3.2
-    pdf: ^3.11.1
+  pdf: ^3.11.1
   printing: ^5.13.4
+  file_picker: ^8.1.7
+  path_provider: ^2.1.5
+  share_plus: ^10.1.4
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -23,5 +26,5 @@ flutter_launcher_icons:
   android: true
   ios: false
   image_path: assets/app_icon.png
-  adaptive_icon_background: "#101B30"
+  adaptive_icon_background: '#101B30'
   adaptive_icon_foreground: assets/app_icon.png

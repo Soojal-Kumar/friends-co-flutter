@@ -1,171 +1,147 @@
-
 import 'dart:convert';
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+
+const navy = Color(0xFF101B30), gold = Color(0xFFD3AE60), surface = Color(0xFFF4F6FA);
+String money(num n) => 'Rs. ${n.toStringAsFixed(0).replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',')}';
+num number(dynamic x) => x is num ? x : num.tryParse('$x') ?? 0;
+String dateNow() => DateTime.now().toIso8601String();
+String shortDate(dynamic d) => '${d ?? ''}'.split('T').first;
+String id() => DateTime.now().microsecondsSinceEpoch.toString();
 
 void main() { WidgetsFlutterBinding.ensureInitialized(); runApp(const FriendsApp()); }
-const navy=Color(0xFF101B30), gold=Color(0xFFD3AE60), surface=Color(0xFFF4F6FA);
-String cash(num n)=>'Rs. ${n.toStringAsFixed(0).replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'),(m)=>',')}';
 
 class Store extends ChangeNotifier {
-  List<Map<String,dynamic>> products=[],customers=[],suppliers=[],sales=[],purchases=[],expenses=[];
+  List<Map<String, dynamic>> products=[], customers=[], suppliers=[], sales=[], purchases=[], expenses=[], godowns=[], movements=[], payments=[], returns=[], accountEntries=[];
+  String pin='';
+  List<Map<String,dynamic>> rows(Map<String,dynamic> d,String key) => ((d[key]??[]) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
   Future<void> load() async {
     final p=await SharedPreferences.getInstance();
     try {
-      final d=jsonDecode(p.getString('fc_flutter_data')??'{}') as Map<String,dynamic>;
-      List<Map<String,dynamic>> rows(String k)=>((d[k]??[]) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
-      products=rows('products'); customers=rows('customers'); suppliers=rows('suppliers');
-      sales=rows('sales'); purchases=rows('purchases'); expenses=rows('expenses');
-    } catch (_) {}
+      final d=Map<String,dynamic>.from(jsonDecode(p.getString('fc_flutter_data')??'{}') as Map);
+      products=rows(d,'products'); customers=rows(d,'customers'); suppliers=rows(d,'suppliers'); sales=rows(d,'sales'); purchases=rows(d,'purchases'); expenses=rows(d,'expenses');
+      godowns=rows(d,'godowns'); movements=rows(d,'movements'); payments=rows(d,'payments'); returns=rows(d,'returns'); accountEntries=rows(d,'accountEntries'); pin='${d['pin']??''}';
+      if(godowns.isEmpty) godowns.add({'id':'main','name':'Main Godown'});
+      // Legacy products stored only a total qty. Preserve that balance in Main Godown.
+      for(final p in products) {
+        p['id'] ??= id(); p['cost'] ??= 0;
+        if(p['stocks'] is! Map) p['stocks']={'main':number(p['qty']).toInt()};
+      }
+      for(final x in [...customers,...suppliers]) { x['id'] ??= id(); x['opening'] ??= 0; }
+    } catch (_) { godowns=[{'id':'main','name':'Main Godown'}]; }
     notifyListeners();
   }
-  Future<void> persist() async {
+  Future<void> save() async {
     final p=await SharedPreferences.getInstance();
-    await p.setString('fc_flutter_data',jsonEncode({'products':products,'customers':customers,'suppliers':suppliers,'sales':sales,'purchases':purchases,'expenses':expenses}));
+    await p.setString('fc_flutter_data',jsonEncode({'products':products,'customers':customers,'suppliers':suppliers,'sales':sales,'purchases':purchases,'expenses':expenses,'godowns':godowns,'movements':movements,'payments':payments,'returns':returns,'accountEntries':accountEntries,'pin':pin}));
     notifyListeners();
   }
-  num get stock=>products.fold<num>(0,(s,x)=>s+(x['qty'] as num));
-  num get salesTotal=>sales.fold<num>(0,(s,x)=>s+(x['total'] as num));
-  num get purchasesTotal=>purchases.fold<num>(0,(s,x)=>s+(x['total'] as num));
-  num get expenseTotal=>expenses.fold<num>(0,(s,x)=>s+(x['amount'] as num));
+  Map<String,dynamic>? byId(List<Map<String,dynamic>> xs,dynamic key) { for(final x in xs) {if(x['id']==key || x['name']==key) return x;} return null; }
+  String label(List<Map<String,dynamic>> xs,dynamic key) => '${byId(xs,key)?['name']??key??'Unknown'}';
+  int quantity(Map<String,dynamic> p,String g) => number((p['stocks'] as Map?)?[g]).toInt();
+  int totalQty(Map<String,dynamic> p) => ((p['stocks'] as Map?)?.values??[]).fold<int>(0,(a,b)=>a+number(b).toInt());
+  void changeStock(Map<String,dynamic> p,String g,int delta) { final st=Map<String,dynamic>.from(p['stocks'] as Map? ?? {}); st[g]=number(st[g]).toInt()+delta; p['stocks']=st; p['qty']=totalQty(p); }
+  num accountBalance(String account) => accountEntries.where((x)=>x['account']==account).fold<num>(0,(a,x)=>a+number(x['delta']));
+  void postAccount(String account,num delta,String description) {if(delta==0)return; accountEntries.add({'id':id(),'account':account,'delta':delta,'description':description,'date':dateNow()});}
+  Map<String,dynamic> snapshot() => {'products':products,'customers':customers,'suppliers':suppliers,'sales':sales,'purchases':purchases,'expenses':expenses,'godowns':godowns,'movements':movements,'payments':payments,'returns':returns,'accountEntries':accountEntries,'pin':pin};
+  Future<void> restore(String source) async {final d=Map<String,dynamic>.from(jsonDecode(source) as Map);if(d['products'] is! List || d['sales'] is! List || d['godowns'] is! List)throw const FormatException('Invalid FRIENDS & CO. backup');products=rows(d,'products');customers=rows(d,'customers');suppliers=rows(d,'suppliers');sales=rows(d,'sales');purchases=rows(d,'purchases');expenses=rows(d,'expenses');godowns=rows(d,'godowns');movements=rows(d,'movements');payments=rows(d,'payments');returns=rows(d,'returns');accountEntries=rows(d,'accountEntries');pin='${d['pin']??''}';await save();}
+  num get stock => products.fold<num>(0,(a,p)=>a+totalQty(p));
+  num get salesTotal => sales.fold<num>(0,(a,x)=>a+number(x['total']));
+  num get purchaseTotal => purchases.fold<num>(0,(a,x)=>a+number(x['total']));
+  num get expensesTotal => expenses.fold<num>(0,(a,x)=>a+number(x['amount']));
+  num balance(String type,dynamic partyId) {
+    final isCustomer=type=='customer'; final list=isCustomer?customers:suppliers;
+    final party=byId(list,partyId); if(party==null)return 0;
+    num total=number(party['opening']);
+    for(final x in isCustomer?sales:purchases) { if(x['partyId']==party['id'] || x['party']==party['name']) total+=number(x['total'])-number(x['paid']); }
+    for(final x in payments) { if(x['type']==type && x['partyId']==party['id']) total-=number(x['amount']); }
+    for(final x in returns) { if(x['type']==(isCustomer?'sale':'purchase') && x['partyId']==party['id']) total-=number(x['total']); }
+    return total;
+  }
+  num get receivable => customers.fold<num>(0,(a,x)=>a+balance('customer',x['id']));
+  num get payable => suppliers.fold<num>(0,(a,x)=>a+balance('supplier',x['id']));
+  num get grossProfit => sales.fold<num>(0,(a,x)=>a+number(x['total'])-number(x['costTotal'])) - returns.where((x)=>x['type']=='sale').fold<num>(0,(a,x)=>a+number(x['total'])-number(x['costTotal']));
+  num get netProfit => grossProfit-expensesTotal;
+  num get todayProfit {
+    final today=shortDate(dateNow());
+    final sold=sales.where((x)=>shortDate(x['date'])==today).fold<num>(0,(a,x)=>a+number(x['total'])-number(x['costTotal']));
+    final reversed=returns.where((x)=>x['type']=='sale'&&shortDate(x['date'])==today).fold<num>(0,(a,x)=>a+number(x['total'])-number(x['costTotal']));
+    final spent=expenses.where((x)=>shortDate(x['date'])==today).fold<num>(0,(a,x)=>a+number(x['amount']));
+    return sold-reversed-spent;
+  }
 }
 
 class FriendsApp extends StatefulWidget { const FriendsApp({super.key}); @override State<FriendsApp> createState()=>_FriendsAppState(); }
 class _FriendsAppState extends State<FriendsApp> {
-  final store=Store(); bool dark=false;
-  @override void initState(){super.initState();store.load();}
-  @override Widget build(BuildContext context)=>MaterialApp(
-    title:'FRIENDS & CO.',debugShowCheckedModeBanner:false,
-    theme:ThemeData(useMaterial3:true,scaffoldBackgroundColor:surface,colorScheme:ColorScheme.fromSeed(seedColor:navy,primary:navy),fontFamily:'Roboto',appBarTheme:const AppBarTheme(backgroundColor:surface)),
-    darkTheme:ThemeData(useMaterial3:true,brightness:Brightness.dark,colorScheme:ColorScheme.fromSeed(seedColor:gold,brightness:Brightness.dark)),
-    themeMode:dark?ThemeMode.dark:ThemeMode.light,
-    home:AnimatedBuilder(animation:store,builder:(context,_)=>Home(store:store,onTheme:()=>setState(()=>dark=!dark))),
-  );
+  final store=Store(); bool dark=false, unlocked=false;
+  @override void initState(){super.initState();store.load().then((_){if(mounted)setState((){});});}
+  @override Widget build(BuildContext context)=>MaterialApp(title:'FRIENDS & CO.',debugShowCheckedModeBanner:false,
+    theme:ThemeData(useMaterial3:true,scaffoldBackgroundColor:surface,colorScheme:ColorScheme.fromSeed(seedColor:navy,primary:navy)),
+    darkTheme:ThemeData(useMaterial3:true,brightness:Brightness.dark,colorScheme:ColorScheme.fromSeed(seedColor:gold,brightness:Brightness.dark)),themeMode:dark?ThemeMode.dark:ThemeMode.light,
+    home:AnimatedBuilder(animation:store,builder:(ctx,_)=>store.pin.isNotEmpty&&!unlocked?PinScreen(pin:store.pin,onSuccess:()=>setState(()=>unlocked=true)):
+      Home(store:store,onTheme:()=>setState(()=>dark=!dark),onLock:()=>setState(()=>unlocked=false))));
+}
+class PinScreen extends StatefulWidget { final String pin; final VoidCallback onSuccess; const PinScreen({super.key,required this.pin,required this.onSuccess}); @override State<PinScreen> createState()=>_PinScreenState(); }
+class _PinScreenState extends State<PinScreen> {final c=TextEditingController(); String error=''; @override Widget build(BuildContext context)=>Scaffold(body:Center(child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:350),child:Padding(padding:const EdgeInsets.all(24),child:Column(mainAxisSize:MainAxisSize.min,children:[const Icon(Icons.lock_outline,size:55,color:gold),const SizedBox(height:18),const Text('FRIENDS & CO.',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),const SizedBox(height:22),TextField(controller:c,obscureText:true,keyboardType:TextInputType.number,decoration:InputDecoration(labelText:'Owner PIN',errorText:error.isEmpty?null:error,border:const OutlineInputBorder())),const SizedBox(height:14),FilledButton(onPressed:(){if(c.text==widget.pin){widget.onSuccess();}else{setState(()=>error='Incorrect PIN');}},child:const Text('Unlock'))])))));}
 }
 
-class Home extends StatefulWidget { final Store store; final VoidCallback onTheme; const Home({super.key,required this.store,required this.onTheme}); @override State<Home> createState()=>_HomeState(); }
+class Home extends StatefulWidget { final Store store; final VoidCallback onTheme,onLock; const Home({super.key,required this.store,required this.onTheme,required this.onLock}); @override State<Home> createState()=>_HomeState(); }
 class _HomeState extends State<Home> {
- int tab=0; final names=['Dashboard','Sales','Purchase','Stock','More'];
- void jump(int t)=>setState(()=>tab=t);
- @override Widget build(BuildContext context){
-   final s=widget.store;
-   return Scaffold(
-     appBar:AppBar(toolbarHeight:74,titleSpacing:18,title:Row(children:[
-       Container(width:44,height:44,decoration:BoxDecoration(color:navy,borderRadius:BorderRadius.circular(13)),alignment:Alignment.center,child:const Text('F&C',style:TextStyle(color:gold,fontWeight:FontWeight.w800,fontSize:14))),
-       const SizedBox(width:11),const Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-         Text('FRIENDS & CO.',style:TextStyle(fontWeight:FontWeight.w800,fontSize:16,letterSpacing:.4)),
-         Text('Wholesale Manager',style:TextStyle(fontSize:11,color:Colors.grey)),
-       ])),
-     ]),actions:[IconButton(tooltip:'Toggle theme',onPressed:widget.onTheme,icon:const Icon(Icons.dark_mode_outlined)),const SizedBox(width:5)]),
-     body:SafeArea(child:IndexedStack(index:tab,children:[
-       dashboard(s),records('Sales',s.sales,()=>form(context,s,'sale')),
-       records('Purchase',s.purchases,()=>form(context,s,'purchase')),
-       stock(s),more(s),
-     ])),
-     bottomNavigationBar:NavigationBar(height:72,selectedIndex:tab,onDestinationSelected:jump,
-       destinations:const [
-         NavigationDestination(icon:Icon(Icons.grid_view_outlined),selectedIcon:Icon(Icons.grid_view),label:'Home'),
-         NavigationDestination(icon:Icon(Icons.receipt_long_outlined),label:'Sales'),
-         NavigationDestination(icon:Icon(Icons.shopping_bag_outlined),label:'Purchase'),
-         NavigationDestination(icon:Icon(Icons.inventory_2_outlined),label:'Stock'),
-         NavigationDestination(icon:Icon(Icons.menu_rounded),label:'More'),
-       ]),
-   );
- }
- Widget dashboard(Store s)=>ListView(padding:const EdgeInsets.fromLTRB(16,12,16,24),children:[
-   Container(padding:const EdgeInsets.all(20),decoration:BoxDecoration(color:navy,borderRadius:BorderRadius.circular(20)),child:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-     Text("TODAY'S NET PROFIT",style:TextStyle(color:gold,fontWeight:FontWeight.w700,fontSize:12,letterSpacing:1)),
-     SizedBox(height:12),Text('Not calculated yet',style:TextStyle(color:Colors.white,fontWeight:FontWeight.w700,fontSize:22)),
-     SizedBox(height:6),Text('Profit accounting is not implemented in this test build',style:TextStyle(color:Colors.white70,fontSize:11)),
-   ])),
-   const SizedBox(height:18),
-   GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,childAspectRatio:1.75,crossAxisSpacing:10,mainAxisSpacing:10,children:[
-     metric('Sales (all dates)',cash(s.salesTotal),Icons.trending_up),
-     metric('Purchase (all dates)',cash(s.purchasesTotal),Icons.shopping_bag_outlined),
-     metric('Expenses (all dates)',cash(s.expenseTotal),Icons.payments_outlined),
-     metric('Stock', '${s.stock} Outers',Icons.inventory_2_outlined),
-   ]),
-   const SizedBox(height:23),const Text('Quick Actions',style:TextStyle(fontWeight:FontWeight.w800,fontSize:17)),const SizedBox(height:12),
-   GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:3,childAspectRatio:1.14,crossAxisSpacing:10,mainAxisSpacing:10,children:[
-     action('New Sale',Icons.add_shopping_cart,()=>form(context,s,'sale')),
-     action('Purchase',Icons.shopping_cart_checkout,()=>form(context,s,'purchase')),
-     action('Product',Icons.add_box_outlined,()=>form(context,s,'product')),
-     action('Customer',Icons.person_add_alt,()=>form(context,s,'customer')),
-     action('Supplier',Icons.local_shipping_outlined,()=>form(context,s,'supplier')),
-     action('Expense',Icons.receipt_long,()=>form(context,s,'expense')),
-   ]),
-   const SizedBox(height:20),info('Godown-wise stock and customer outstanding will appear after those modules are implemented.'),
- ]);
- Widget metric(String label,String value,IconData icon)=>Card(elevation:0,child:Padding(padding:const EdgeInsets.all(13),child:Column(crossAxisAlignment:CrossAxisAlignment.start,mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[
-   Icon(icon,color:gold,size:20),Text(label,style:const TextStyle(fontSize:11,color:Colors.grey)),Text(value,maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:17,fontWeight:FontWeight.w800)),
- ])));
- Widget action(String title,IconData icon,VoidCallback tap)=>Material(color:Theme.of(context).cardColor,borderRadius:BorderRadius.circular(14),child:InkWell(borderRadius:BorderRadius.circular(14),onTap:tap,child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
-   Icon(icon,color:gold,size:26),const SizedBox(height:9),Text(title,style:const TextStyle(fontSize:12,fontWeight:FontWeight.w700)),
- ])));
- Widget info(String message)=>Card(elevation:0,child:Padding(padding:const EdgeInsets.all(18),child:Row(children:[const Icon(Icons.info_outline,color:Colors.grey),const SizedBox(width:10),Expanded(child:Text(message,style:const TextStyle(fontSize:12,color:Colors.grey)))])));
- Widget records(String title,List<Map<String,dynamic>> items,VoidCallback add)=>ListView(padding:const EdgeInsets.all(16),children:[
-   heading(title,add),if(items.isEmpty)empty('No ${title.toLowerCase()} records yet'),
-   for(final x in items)Card(elevation:0,child:ListTile(title:Text(x['no']??'',style:const TextStyle(fontWeight:FontWeight.w700)),subtitle:Text('${x['party']} · ${x['product']} · ${x['qty']} Outers'),trailing:Text(cash(x['total'] as num),style:const TextStyle(fontWeight:FontWeight.w700)))),
- ]);
- Widget heading(String title,VoidCallback add)=>Padding(padding:const EdgeInsets.only(bottom:15),child:Row(children:[Expanded(child:Text(title,style:const TextStyle(fontWeight:FontWeight.w800,fontSize:21))),FilledButton.icon(onPressed:add,icon:const Icon(Icons.add,size:17),label:const Text('Add'))]));
- Widget empty(String title)=>Padding(padding:const EdgeInsets.symmetric(vertical:70),child:Center(child:Column(children:[const Icon(Icons.inbox_outlined,size:42,color:Colors.grey),const SizedBox(height:12),Text(title,style:const TextStyle(color:Colors.grey))])));
- Widget stock(Store s)=>ListView(padding:const EdgeInsets.all(16),children:[
-   heading('Products',()=>form(context,s,'product')),if(s.products.isEmpty)empty('No products yet'),
-   for(final p in s.products)Card(elevation:0,child:ListTile(leading:const CircleAvatar(child:Icon(Icons.inventory_2_outlined)),title:Text(p['name']),subtitle:const Text('Current quantity'),trailing:Text('${p['qty']} Outers',style:const TextStyle(fontWeight:FontWeight.w700)))),
- ]);
- Widget more(Store s)=>ListView(padding:const EdgeInsets.all(16),children:[
-   for(final entry in [('Customers','customer',s.customers),('Suppliers','supplier',s.suppliers),('Expenses','expense',s.expenses)])
-     Card(elevation:0,margin:const EdgeInsets.only(bottom:12),child:ExpansionTile(title:Text(entry.$1 as String,style:const TextStyle(fontWeight:FontWeight.w700)),subtitle:Text('${(entry.$3 as List).length} records'),trailing:IconButton(icon:const Icon(Icons.add_circle_outline),onPressed:()=>form(context,s,entry.$2 as String)),children:[
-       for(final x in entry.$3 as List<Map<String,dynamic>>)ListTile(title:Text('${x['name']??x['category']}'),subtitle:Text(x['phone']??''),trailing:Text(x['amount']==null?'':cash(x['amount'] as num))),
-     ])),
-   const SizedBox(height:8),info('Test app: local storage only. No cloud backup, ledger, multi-godown, PDF invoices or authentication yet.'),
- ]);
+  int tab=0; final tabs=['Dashboard','Sales','Purchases','Stock','More'];
+  void go(int t)=>setState(()=>tab=t);
+  @override Widget build(BuildContext context) {final s=widget.store;return Scaffold(
+    appBar:AppBar(toolbarHeight:72,title:Row(children:[Container(width:44,height:44,alignment:Alignment.center,decoration:BoxDecoration(color:navy,borderRadius:BorderRadius.circular(12)),child:const Text('F&C',style:TextStyle(color:gold,fontWeight:FontWeight.w800))),const SizedBox(width:10),const Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('FRIENDS & CO.',style:TextStyle(fontSize:16,fontWeight:FontWeight.w800)),Text('Wholesale Manager',style:TextStyle(fontSize:11,color:Colors.grey))]))]),actions:[IconButton(onPressed:widget.onTheme,icon:const Icon(Icons.dark_mode_outlined))]),
+    body:IndexedStack(index:tab,children:[dashboard(s),transactions(s,'sale'),transactions(s,'purchase'),stock(s),more(s)]),
+    bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:go,destinations:const [NavigationDestination(icon:Icon(Icons.dashboard_outlined),label:'Home'),NavigationDestination(icon:Icon(Icons.receipt_long_outlined),label:'Sales'),NavigationDestination(icon:Icon(Icons.shopping_bag_outlined),label:'Purchase'),NavigationDestination(icon:Icon(Icons.inventory_2_outlined),label:'Stock'),NavigationDestination(icon:Icon(Icons.menu),label:'More')]));}
+  Widget card(String title,String value,IconData icon)=>Card(elevation:0,child:Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[Icon(icon,color:gold),Text(title,style:const TextStyle(fontSize:11,color:Colors.grey)),Text(value,maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:17,fontWeight:FontWeight.w800))])));
+  Widget action(String label,IconData icon,VoidCallback onTap)=>Card(elevation:0,child:InkWell(onTap:onTap,borderRadius:BorderRadius.circular(12),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Icon(icon,color:gold,size:25),const SizedBox(height:7),Text(label,textAlign:TextAlign.center,style:const TextStyle(fontSize:12,fontWeight:FontWeight.w700))])));
+  Widget dashboard(Store s)=>ListView(padding:const EdgeInsets.all(16),children:[Container(padding:const EdgeInsets.all(20),decoration:BoxDecoration(color:navy,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text("TODAY'S NET PROFIT",style:TextStyle(color:gold,fontWeight:FontWeight.bold,letterSpacing:1)),const SizedBox(height:10),Text(money(s.todayProfit),style:const TextStyle(color:Colors.white,fontSize:27,fontWeight:FontWeight.w800)),const SizedBox(height:5),const Text('Average-cost estimate; historical sales may lack cost data',style:TextStyle(color:Colors.white70,fontSize:11))])),const SizedBox(height:14),GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,childAspectRatio:1.75,mainAxisSpacing:8,crossAxisSpacing:8,children:[card('Sales',money(s.salesTotal),Icons.trending_up),card('Purchases',money(s.purchaseTotal),Icons.shopping_bag),card('Customer Due',money(s.receivable),Icons.account_balance_wallet_outlined),card('Supplier Due',money(s.payable),Icons.payments_outlined),card('Stock','${s.stock} Outers',Icons.inventory_2_outlined),card('Expenses',money(s.expensesTotal),Icons.receipt_long_outlined)]),const SizedBox(height:18),const Text('Quick Actions',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),const SizedBox(height:10),GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:3,childAspectRatio:1.14,mainAxisSpacing:8,crossAxisSpacing:8,children:[action('New Sale',Icons.add_shopping_cart,()=>transactionForm(s,'sale')),action('Purchase',Icons.shopping_cart_checkout,()=>transactionForm(s,'purchase')),action('Product',Icons.add_box_outlined,()=>addProduct(s)),action('Customer',Icons.person_add,()=>addParty(s,'customer')),action('Supplier',Icons.local_shipping_outlined,()=>addParty(s,'supplier')),action('Godown',Icons.warehouse_outlined,()=>addGodown(s))])]);
+  Widget heading(String title,VoidCallback add)=>Padding(padding:const EdgeInsets.only(bottom:12),child:Row(children:[Expanded(child:Text(title,style:const TextStyle(fontSize:21,fontWeight:FontWeight.w800))),FilledButton.icon(onPressed:add,icon:const Icon(Icons.add,size:18),label:const Text('Add'))]));
+  Widget blank(String text)=>Padding(padding:const EdgeInsets.symmetric(vertical:60),child:Center(child:Text(text,style:const TextStyle(color:Colors.grey))));
+  Widget transactions(Store s,String type) {final xs=type=='sale'?s.sales:s.purchases;return ListView(padding:const EdgeInsets.all(16),children:[heading(type=='sale'?'Sales':'Purchases',()=>transactionForm(s,type)),if(xs.isEmpty)blank('No records yet'),for(final x in xs.reversed)Card(elevation:0,child:ListTile(isThreeLine:true,title:Text('${x['no']??''} • ${x['party']??''}',style:const TextStyle(fontWeight:FontWeight.w700)),subtitle:Text('${shortDate(x['date'])} • ${x['product']??''} • ${x['qty']} Outers\n${x['godownName']??'Legacy stock'}'),trailing:Column(mainAxisAlignment:MainAxisAlignment.center,mainAxisSize:MainAxisSize.min,children:[Text(money(number(x['total'])),style:const TextStyle(fontWeight:FontWeight.bold)),const Icon(Icons.picture_as_pdf_outlined,color:gold)]),onTap:()=>invoicePdf(s,x,type)))]);}
+  Widget stock(Store s)=>ListView(padding:const EdgeInsets.all(16),children:[heading('Products',()=>addProduct(s)),if(s.products.isEmpty)blank('No products yet'),for(final p in s.products)Card(elevation:0,child:ExpansionTile(title:Text('${p['name']}',style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('${s.totalQty(p)} Outers • Avg cost ${money(number(p['cost']))}'),children:[for(final g in s.godowns)ListTile(title:Text('${g['name']}'),trailing:Text('${s.quantity(p,'${g['id']}')} Outers'))]))]);
+  Widget menuTile(String title,IconData icon,VoidCallback onTap)=>Card(elevation:0,margin:const EdgeInsets.only(bottom:8),child:ListTile(leading:Icon(icon,color:gold),title:Text(title,style:const TextStyle(fontWeight:FontWeight.w600)),trailing:const Icon(Icons.chevron_right),onTap:onTap));
+  Widget more(Store s)=>ListView(padding:const EdgeInsets.all(16),children:[menuTile('Customers & Outstanding',Icons.people_outline,()=>partyPage(s,'customer')),menuTile('Suppliers & Payables',Icons.local_shipping_outlined,()=>partyPage(s,'supplier')),menuTile('Godowns',Icons.warehouse_outlined,()=>godownPage(s)),menuTile('Stock Transfer',Icons.swap_horiz,()=>transferForm(s)),menuTile('Stock Adjustment',Icons.tune,()=>adjustStock(s)),menuTile('Stock Movement History',Icons.history,()=>movementPage(s)),menuTile('Cash & Bank',Icons.account_balance,()=>accountPage(s)),menuTile('Sales Returns',Icons.assignment_return_outlined,()=>returnForm(s,'sale')),menuTile('Purchase Returns',Icons.keyboard_return,()=>returnForm(s,'purchase')),menuTile('Expenses',Icons.receipt_long,()=>expensePage(s)),menuTile('Reports',Icons.bar_chart,()=>reportPage(s)),menuTile('Owner PIN',Icons.lock_outline,()=>pinForm(s)),menuTile('Export Backup',Icons.ios_share,()=>exportBackup(s)),menuTile('Restore Backup',Icons.restore,()=>importBackup(s)),const Padding(padding:EdgeInsets.all(10),child:Text('Offline data. Export backup regularly. Cloud sync is not included.',style:TextStyle(fontSize:12,color:Colors.grey)))]);
+  void open(Widget page)=>Navigator.of(context).push(MaterialPageRoute(builder:(_)=>page));
+  Future<void> sheet(String title,List<Widget> children) async {await showModalBottomSheet<void>(context:context,isScrollControlled:true,useSafeArea:true,showDragHandle:true,builder:(ctx)=>Padding(padding:EdgeInsets.fromLTRB(18,0,18,MediaQuery.of(ctx).viewInsets.bottom+16),child:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[Text(title,style:const TextStyle(fontSize:22,fontWeight:FontWeight.bold)),const SizedBox(height:15),...children]))));}
+  Widget field(String label,TextEditingController c,{bool numeric=false})=>Padding(padding:const EdgeInsets.only(bottom:12),child:TextField(controller:c,keyboardType:numeric?const TextInputType.numberWithOptions(decimal:true):TextInputType.text,decoration:InputDecoration(labelText:label,border:const OutlineInputBorder())));
+  void error(String msg){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(msg)));}
+  Widget saveButton(BuildContext ctx,Future<void> Function() save)=>FilledButton(onPressed:()async{await save();},child:const Padding(padding:EdgeInsets.all(12),child:Text('Save Record')));
+  void addGodown(Store s){final c=TextEditingController();sheet('Add Godown',[field('Godown name',c),Builder(builder:(ctx)=>saveButton(ctx,()async{if(c.text.trim().isEmpty)return error('Enter godown name');if(s.godowns.any((g)=>g['name']==c.text.trim()))return error('Godown already exists');s.godowns.add({'id':id(),'name':c.text.trim()});await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void addProduct(Store s){final name=TextEditingController(),qty=TextEditingController(text:'0'),cost=TextEditingController(text:'0');String godown='${s.godowns.first['id']}';sheet('Add Product',[field('Product name',name),field('Opening stock (whole Outers)',qty,numeric:true),field('Opening cost per Outer',cost,numeric:true),StatefulBuilder(builder:(ctx,set)=>DropdownButtonFormField<String>(initialValue:godown,decoration:const InputDecoration(labelText:'Opening stock godown'),items:s.godowns.map((g)=>DropdownMenuItem(value:'${g['id']}',child:Text('${g['name']}'))).toList(),onChanged:(v)=>set(()=>godown=v??godown))),const SizedBox(height:12),Builder(builder:(ctx)=>saveButton(ctx,()async{final q=int.tryParse(qty.text),c=num.tryParse(cost.text);if(name.text.trim().isEmpty||q==null||q<0||c==null||c<0)return error('Enter valid name, whole Outers and cost');if(s.products.any((p)=>p['name']==name.text.trim()))return error('Product already exists');s.products.add({'id':id(),'name':name.text.trim(),'qty':q,'cost':c,'stocks':{godown:q}});await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void addParty(Store s,String type){final name=TextEditingController(),phone=TextEditingController(),opening=TextEditingController(text:'0');sheet('Add ${type=='customer'?'Customer':'Supplier'}',[field('Name',name),field('Phone (optional)',phone),field('Opening ${type=='customer'?'receivable':'payable'} (PKR)',opening,numeric:true),Builder(builder:(ctx)=>saveButton(ctx,()async{final n=num.tryParse(opening.text);if(name.text.trim().isEmpty||n==null)return error('Enter valid name and opening balance');final list=type=='customer'?s.customers:s.suppliers;if(list.any((x)=>x['name']==name.text.trim()))return error('Name already exists');list.add({'id':id(),'name':name.text.trim(),'phone':phone.text.trim(),'opening':n});await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void transactionForm(Store s,String type){if(s.products.isEmpty||s.godowns.isEmpty||(type=='sale'?s.customers:s.suppliers).isEmpty)return error('Add product, godown and ${type=='sale'?'customer':'supplier'} first');final parties=type=='sale'?s.customers:s.suppliers;String party='${parties.first['id']}',product='${s.products.first['id']}',godown='${s.godowns.first['id']}';final qty=TextEditingController(),rate=TextEditingController(),paid=TextEditingController(text:'0');sheet(type=='sale'?'New Sale':'New Purchase',[StatefulBuilder(builder:(ctx,set)=>Column(children:[DropdownButtonFormField<String>(initialValue:party,isExpanded:true,decoration:InputDecoration(labelText:type=='sale'?'Customer':'Supplier'),items:parties.map((p)=>DropdownMenuItem(value:'${p['id']}',child:Text('${p['name']}'))).toList(),onChanged:(v)=>set(()=>party=v??party)),const SizedBox(height:10),DropdownButtonFormField<String>(initialValue:product,isExpanded:true,decoration:const InputDecoration(labelText:'Product'),items:s.products.map((p)=>DropdownMenuItem(value:'${p['id']}',child:Text('${p['name']}'))).toList(),onChanged:(v)=>set(()=>product=v??product)),const SizedBox(height:10),DropdownButtonFormField<String>(initialValue:godown,isExpanded:true,decoration:const InputDecoration(labelText:'Godown'),items:s.godowns.map((g)=>DropdownMenuItem(value:'${g['id']}',child:Text('${g['name']}'))).toList(),onChanged:(v)=>set(()=>godown=v??godown))])),const SizedBox(height:12),field('Quantity (whole Outers)',qty,numeric:true),field('Rate per Outer (PKR)',rate,numeric:true),field(type=='sale'?'Amount received now':'Amount paid now',paid,numeric:true),const Text('One product per invoice. You can share a PDF after saving.',style:TextStyle(color:Colors.grey,fontSize:12)),const SizedBox(height:12),Builder(builder:(ctx)=>saveButton(ctx,()async{final q=int.tryParse(qty.text),r=num.tryParse(rate.text),a=num.tryParse(paid.text);if(q==null||q<=0||r==null||r<=0||a==null||a<0||a>q*r)return error('Check quantity, rate and payment');final p=s.byId(s.products,product)!;if(type=='sale'&&s.quantity(p,godown)<q)return error('Insufficient stock in selected godown');final oldQty=s.stockForProduct(p);final oldCost=number(p['cost']);if(type=='purchase'){p['cost']=oldQty+q==0?0:(oldCost*oldQty+r*q)/(oldQty+q);}s.changeStock(p,godown,type=='sale'?-q:q);final xs=type=='sale'?s.sales:s.purchases;final record={'id':id(),'no':'${type=='sale'?'SALE':'PUR'}-${(xs.length+1).toString().padLeft(4,'0')}','partyId':party,'party':s.label(parties,party),'productId':product,'product':p['name'],'godownId':godown,'godownName':s.label(s.godowns,godown),'qty':q,'rate':r,'total':q*r,'paid':a,'costTotal':oldCost*q,'date':dateNow()};xs.add(record);s.postAccount('Cash',type=='sale'?a:-a,'${record['no']}');await s.save();if(ctx.mounted)Navigator.pop(ctx);if(mounted)invoicePdf(s,record,type);}))]);}
+  void partyPage(Store s,String type){open(PartyPage(store:s,type:type,onAdd:()=>addParty(s,type),onPayment:(p)=>paymentForm(s,type,p),onPdf:(p)=>ledgerPdf(s,type,p)));}
+  void paymentForm(Store s,String type,Map<String,dynamic> party){final amount=TextEditingController(),method=TextEditingController(text:'Cash'),note=TextEditingController();final before=s.balance(type,party['id']);sheet(type=='customer'?'Receive Payment':'Pay Supplier',[Text('${party['name']} • Due ${money(before)}'),const SizedBox(height:12),field('Amount (PKR)',amount,numeric:true),field('Payment method (Cash / Bank / etc.)',method),field('Note (optional)',note),Builder(builder:(ctx)=>saveButton(ctx,()async{final a=num.tryParse(amount.text);if(a==null||a<=0)return error('Enter a valid amount');final x={'id':id(),'no':'PAY-${(s.payments.length+1).toString().padLeft(4,'0')}','type':type,'partyId':party['id'],'party':'${party['name']}','amount':a,'method':method.text.trim(),'note':note.text.trim(),'previous':before,'remaining':before-a,'date':dateNow()};s.payments.add(x);s.postAccount(method.text.trim().toLowerCase()=='bank'?'Bank':'Cash',type=='customer'?a:-a,'${x['no']}');await s.save();if(ctx.mounted)Navigator.pop(ctx);if(mounted)paymentPdf(x);}))]);}
+  void godownPage(Store s){open(SimplePage(title:'Godowns',add:()=>addGodown(s),body:AnimatedBuilder(animation:s,builder:(_,__)=>ListView(children:[for(final g in s.godowns)Card(child:ListTile(title:Text('${g['name']}'),subtitle:Text('${s.products.fold<int>(0,(a,p)=>a+s.quantity(p,'${g['id']}'))} Outers'),trailing:IconButton(icon:const Icon(Icons.edit_outlined),onPressed:()=>renameGodown(s,g)))]))));}
+  void renameGodown(Store s,Map<String,dynamic> g){final c=TextEditingController(text:'${g['name']}');sheet('Rename Godown',[field('Name',c),Builder(builder:(ctx)=>saveButton(ctx,()async{if(c.text.trim().isEmpty)return error('Enter name');g['name']=c.text.trim();await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void transferForm(Store s){if(s.products.isEmpty||s.godowns.length<2)return error('Add a product and at least two godowns');String product='${s.products.first['id']}',from='${s.godowns.first['id']}',to='${s.godowns[1]['id']}';final qty=TextEditingController();sheet('Stock Transfer',[StatefulBuilder(builder:(ctx,set)=>Column(children:[DropdownButtonFormField<String>(initialValue:product,decoration:const InputDecoration(labelText:'Product'),items:s.products.map((p)=>DropdownMenuItem(value:'${p['id']}',child:Text('${p['name']}'))).toList(),onChanged:(v)=>set(()=>product=v??product)),DropdownButtonFormField<String>(initialValue:from,decoration:const InputDecoration(labelText:'From Godown'),items:s.godowns.map((g)=>DropdownMenuItem(value:'${g['id']}',child:Text('${g['name']}'))).toList(),onChanged:(v)=>set(()=>from=v??from)),DropdownButtonFormField<String>(initialValue:to,decoration:const InputDecoration(labelText:'To Godown'),items:s.godowns.map((g)=>DropdownMenuItem(value:'${g['id']}',child:Text('${g['name']}'))).toList(),onChanged:(v)=>set(()=>to=v??to))])),const SizedBox(height:12),field('Whole Outers',qty,numeric:true),Builder(builder:(ctx)=>saveButton(ctx,()async{final q=int.tryParse(qty.text);final p=s.byId(s.products,product)!;if(q==null||q<=0||from==to||s.quantity(p,from)<q)return error('Invalid transfer or insufficient stock');s.changeStock(p,from,-q);s.changeStock(p,to,q);s.movements.add({'id':id(),'product':p['name'],'from':s.label(s.godowns,from),'to':s.label(s.godowns,to),'qty':q,'date':dateNow()});await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void adjustStock(Store s){if(s.products.isEmpty)return error('Add a product first');String product='${s.products.first['id']}',godown='${s.godowns.first['id']}';final qty=TextEditingController(),reason=TextEditingController();sheet('Stock Adjustment',[StatefulBuilder(builder:(ctx,set)=>Column(children:[DropdownButtonFormField<String>(initialValue:product,decoration:const InputDecoration(labelText:'Product'),items:s.products.map((p)=>DropdownMenuItem(value:'${p['id']}',child:Text('${p['name']}'))).toList(),onChanged:(v)=>set(()=>product=v??product)),DropdownButtonFormField<String>(initialValue:godown,decoration:const InputDecoration(labelText:'Godown'),items:s.godowns.map((g)=>DropdownMenuItem(value:'${g['id']}',child:Text('${g['name']}'))).toList(),onChanged:(v)=>set(()=>godown=v??godown))])),const SizedBox(height:12),field('Change in Outers (+5 or -3)',qty),field('Reason',reason),Builder(builder:(ctx)=>saveButton(ctx,()async{final q=int.tryParse(qty.text);final p=s.byId(s.products,product)!;if(q==null||q==0||reason.text.trim().isEmpty||s.quantity(p,godown)+q<0)return error('Invalid adjustment or insufficient stock');s.changeStock(p,godown,q);s.movements.add({'id':id(),'type':'adjustment','product':p['name'],'godown':s.label(s.godowns,godown),'qty':q,'reason':reason.text.trim(),'date':dateNow()});await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void movementPage(Store s){open(SimplePage(title:'Stock History',body:AnimatedBuilder(animation:s,builder:(_,__)=>ListView(children:[for(final x in s.movements.reversed)Card(child:ListTile(title:Text('${x['product']} • ${x['qty']} Outers'),subtitle:Text('${x['reason']??'${x['from']??''} → ${x['to']??''}'} • ${shortDate(x['date'])}')))]))));}
+  void accountPage(Store s){open(SimplePage(title:'Cash & Bank',body:AnimatedBuilder(animation:s,builder:(_,__)=>ListView(padding:const EdgeInsets.all(12),children:[for(final a in ['Cash','Bank'])Card(child:ListTile(title:Text('$a balance'),trailing:Text(money(s.accountBalance(a))))),const Padding(padding:EdgeInsets.all(12),child:Text('Balances track transactions recorded by this version only. Opening balances and older entries require reconciliation.')),FilledButton.icon(onPressed:()=>accountEntryForm(s),icon:const Icon(Icons.add),label:const Text('Deposit / Withdrawal / Transfer')),for(final x in s.accountEntries.reversed)ListTile(title:Text('${x['description']}'),subtitle:Text('${x['account']} • ${shortDate(x['date'])}'),trailing:Text(money(number(x['delta']))))]))));}
+  void accountEntryForm(Store s){String account='Cash';final amount=TextEditingController(),description=TextEditingController();sheet('Cash / Bank Entry',[StatefulBuilder(builder:(ctx,set)=>DropdownButtonFormField<String>(initialValue:account,decoration:const InputDecoration(labelText:'Account'),items:const [DropdownMenuItem(value:'Cash',child:Text('Cash')),DropdownMenuItem(value:'Bank',child:Text('Bank'))],onChanged:(v)=>set(()=>account=v??account))),const SizedBox(height:12),field('Amount (+ deposit, - withdrawal)',amount),field('Description',description),Builder(builder:(ctx)=>saveButton(ctx,()async{final a=num.tryParse(amount.text);if(a==null||a==0||description.text.trim().isEmpty)return error('Enter amount and description');s.postAccount(account,a,description.text.trim());await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  Future<void> exportBackup(Store s) async {try{final dir=await getTemporaryDirectory();final f=File('${dir.path}/friends_co_backup_${DateTime.now().millisecondsSinceEpoch}.json');await f.writeAsString(jsonEncode(s.snapshot()),flush:true);await Share.shareXFiles([XFile(f.path)],text:'FRIENDS & CO. offline data backup. Keep this file private.');}catch(e){error('Backup export failed: $e');}}
+  Future<void> importBackup(Store s) async {try{final result=await FilePicker.platform.pickFiles(type:FileType.custom,allowedExtensions:['json'],withData:true);if(result==null)return;final bytes=result.files.single.bytes;final path=result.files.single.path;final contents=bytes!=null?utf8.decode(bytes):path!=null?await File(path).readAsString():null;if(contents==null)throw const FormatException('Could not read backup');if(!mounted)return;final yes=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(title:const Text('Replace all local data?'),content:const Text('Restoring a backup replaces all current records. Export your current data first.'),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Restore'))]));if(yes!=true)return;await s.restore(contents);error('Backup restored');}catch(e){error('Restore failed: $e');}}
+  void returnForm(Store s,String type){final xs=type=='sale'?s.sales:s.purchases;if(xs.isEmpty)return error('No original invoices found');String invoice='${xs.last['id']??xs.last['no']}';final qty=TextEditingController();sheet(type=='sale'?'Sales Return':'Purchase Return',[StatefulBuilder(builder:(ctx,set)=>DropdownButtonFormField<String>(initialValue:invoice,isExpanded:true,decoration:const InputDecoration(labelText:'Original invoice'),items:xs.map((x)=>DropdownMenuItem(value:'${x['id']??x['no']}',child:Text('${x['no']} • ${x['product']}'))).toList(),onChanged:(v)=>set(()=>invoice=v??invoice))),const SizedBox(height:12),field('Return quantity (whole Outers)',qty,numeric:true),Builder(builder:(ctx)=>saveButton(ctx,()async{final q=int.tryParse(qty.text);final x=xs.firstWhere((x)=>'${x['id']??x['no']}'==invoice);final already=s.returns.where((r)=>r['invoice']==invoice&&r['type']==type).fold<int>(0,(a,r)=>a+number(r['qty']).toInt());if(q==null||q<=0||q+already>number(x['qty']))return error('Return exceeds remaining invoice quantity');final p=s.byId(s.products,x['productId']??x['product']);if(p==null)return error('Product not found');final g='${x['godownId']??'main'}';if(type=='purchase'&&s.quantity(p,g)<q)return error('Not enough stock to return to supplier');s.changeStock(p,g,type=='sale'?q:-q);final row={'id':id(),'type':type,'invoice':invoice,'partyId':x['partyId'],'party':x['party'],'product':x['product'],'qty':q,'total':q*number(x['rate']),'costTotal':q*number(x['costTotal'])/number(x['qty']),'date':dateNow()};s.returns.add(row);await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void expensePage(Store s){open(SimplePage(title:'Expenses',add:()=>expenseForm(s),body:AnimatedBuilder(animation:s,builder:(_,__)=>ListView(children:[for(final x in s.expenses.reversed)Card(child:ListTile(title:Text('${x['category']}'),subtitle:Text(shortDate(x['date'])),trailing:Text(money(number(x['amount'])))))]))));}
+  void expenseForm(Store s){final category=TextEditingController(),amount=TextEditingController();sheet('Add Expense',[field('Category',category),field('Amount (PKR)',amount,numeric:true),Builder(builder:(ctx)=>saveButton(ctx,()async{final a=num.tryParse(amount.text);if(category.text.trim().isEmpty||a==null||a<=0)return error('Enter category and amount');s.expenses.add({'id':id(),'category':category.text.trim(),'amount':a,'date':dateNow()});s.postAccount('Cash',-a,'Expense: ${category.text.trim()}');await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  void reportPage(Store s){open(SimplePage(title:'Reports',body:AnimatedBuilder(animation:s,builder:(_,__)=>ListView(padding:const EdgeInsets.all(16),children:[for(final x in [('Total Sales',money(s.salesTotal)),('Total Purchases',money(s.purchaseTotal)),('Customer Outstanding',money(s.receivable)),('Supplier Payable',money(s.payable)),('Expenses',money(s.expensesTotal)),('Estimated Gross Profit',money(s.grossProfit)),('Estimated Net Profit',money(s.netProfit)),('Stock', '${s.stock} Outers')])Card(child:ListTile(title:Text(x.$1),trailing:Text(x.$2,style:const TextStyle(fontWeight:FontWeight.bold)))),const Text('Profit for older invoices may be inaccurate because cost was not recorded by the previous app.',style:TextStyle(color:Colors.grey,fontSize:12))]))));}
+  void pinForm(Store s){final c=TextEditingController();sheet('Owner PIN',[const Text('Set a 4–8 digit PIN. A PIN is a basic screen lock, not encrypted storage.'),const SizedBox(height:10),field('New PIN (leave blank to remove)',c,numeric:true),Builder(builder:(ctx)=>saveButton(ctx,()async{if(c.text.isNotEmpty&&!RegExp(r'^\d{4,8}$').hasMatch(c.text))return error('PIN must be 4–8 digits');s.pin=c.text;await s.save();if(ctx.mounted)Navigator.pop(ctx);}))]);}
+  Future<void> invoicePdf(Store s,Map<String,dynamic> x,String type) async {final doc=pw.Document();final title=type=='sale'?'SALES INVOICE':'PURCHASE INVOICE';doc.addPage(pw.Page(build:(_)=>pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start,children:[pdfHeader(title),pw.SizedBox(height:20),pw.Text('Invoice: ${x['no']}'),pw.Text('Date: ${shortDate(x['date'])}'),pw.Text('${type=='sale'?'Customer':'Supplier'}: ${x['party']}'),pw.Text('Godown: ${x['godownName']??'Not recorded'}'),pw.SizedBox(height:18),pw.Table.fromTextArray(headers:['Product','Outers','Rate','Amount'],data:[['${x['product']}','${x['qty']}',money(number(x['rate'])),money(number(x['total']))]]),pw.SizedBox(height:18),pw.Text('Total: ${money(number(x['total']))}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:16)),pw.Text('Paid: ${money(number(x['paid']))}'),pw.Text('Balance: ${money(number(x['total'])-number(x['paid']))}'),pw.Spacer(),pw.Text('Thank you for your business.')])));await Printing.sharePdf(bytes:await doc.save(),filename:'${x['no']}.pdf');}
+  Future<void> paymentPdf(Map<String,dynamic> x) async {final doc=pw.Document();doc.addPage(pw.Page(build:(_)=>pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start,children:[pdfHeader(x['type']=='customer'?'PAYMENT RECEIPT':'PAYMENT VOUCHER'),pw.SizedBox(height:20),pw.Text('Receipt: ${x['no']}'),pw.Text('Date: ${shortDate(x['date'])}'),pw.Text('Party: ${x['party']}'),pw.Text('Method: ${x['method']}'),pw.SizedBox(height:15),pw.Text('Amount: ${money(number(x['amount']))}',style:pw.TextStyle(fontSize:20,fontWeight:pw.FontWeight.bold)),pw.Text('Previous due: ${money(number(x['previous']))}'),pw.Text('Remaining due: ${money(number(x['remaining']))}'),pw.Text('Note: ${x['note']??''}')])));await Printing.sharePdf(bytes:await doc.save(),filename:'${x['no']}.pdf');}
+  Future<void> ledgerPdf(Store s,String type,Map<String,dynamic> party) async {final doc=pw.Document();final rows=<List<String>>[];for(final x in type=='customer'?s.sales:s.purchases){if(x['partyId']==party['id']||x['party']==party['name'])rows.add([shortDate(x['date']),'${x['no']}','${money(number(x['total']))}','${money(number(x['paid']))}']);}for(final x in s.payments){if(x['type']==type&&x['partyId']==party['id'])rows.add([shortDate(x['date']),'${x['no']}','-',money(number(x['amount']))]);}doc.addPage(pw.MultiPage(build:(_)=>[pdfHeader('PARTY LEDGER'),pw.SizedBox(height:15),pw.Text('${party['name']}'),pw.Text('Current due: ${money(s.balance(type,party['id']))}'),pw.SizedBox(height:12),pw.Table.fromTextArray(headers:['Date','Reference','Invoice','Paid'],data:rows)]));await Printing.sharePdf(bytes:await doc.save(),filename:'ledger_${party['name']}.pdf');}
+  pw.Widget pdfHeader(String title)=>pw.Container(padding:const pw.EdgeInsets.all(16),color:PdfColor.fromHex('#101B30'),child:pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start,children:[pw.Text('FRIENDS & CO.',style:pw.TextStyle(color:PdfColor.fromHex('#D3AE60'),fontSize:24,fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:5),pw.Text(title,style:const pw.TextStyle(color:PdfColors.white,fontSize:13))]));
 }
 
-Future<void> form(BuildContext context,Store s,String type) async {
- final name=TextEditingController(),phone=TextEditingController(),qty=TextEditingController(text:type=='product'?'0':''),rate=TextEditingController(),amount=TextEditingController();
- String? party,product; final key=GlobalKey<FormState>();
- final title={'product':'Add Product','customer':'Add Customer','supplier':'Add Supplier','expense':'Add Expense','sale':'New Sale','purchase':'New Purchase'}[type]!;
- final parties=type=='sale'?s.customers:s.suppliers;
- await showModalBottomSheet<void>(context:context,isScrollControlled:true,showDragHandle:true,useSafeArea:true,builder:(ctx)=>StatefulBuilder(builder:(ctx,setModal)=>Padding(
-   padding:EdgeInsets.fromLTRB(20,0,20,MediaQuery.of(ctx).viewInsets.bottom+20),child:SingleChildScrollView(child:Form(key:key,child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,mainAxisSize:MainAxisSize.min,children:[
-     Text(title,style:const TextStyle(fontWeight:FontWeight.w800,fontSize:22)),const SizedBox(height:16),
-     if(['product','customer','supplier'].contains(type))field('Name',name),
-     if(['customer','supplier'].contains(type))field('Phone (optional)',phone,number:true),
-     if(type=='product')field('Opening stock (whole Outers)',qty,number:true),
-     if(type=='expense')... [field('Expense category',name),field('Amount (PKR)',amount,number:true)],
-     if(['sale','purchase'].contains(type))...[
-       DropdownButtonFormField<String>(value:party,decoration:const InputDecoration(labelText:'Customer / Supplier',border:OutlineInputBorder()),items:parties.map((p)=>DropdownMenuItem<String>(value:p['name'] as String,child:Text(p['name']))).toList(),onChanged:(v)=>setModal(()=>party=v)),
-       const SizedBox(height:12),
-       DropdownButtonFormField<String>(value:product,decoration:const InputDecoration(labelText:'Product',border:OutlineInputBorder()),items:s.products.map((p)=>DropdownMenuItem<String>(value:p['name'] as String,child:Text(p['name']))).toList(),onChanged:(v)=>setModal(()=>product=v)),
-       const SizedBox(height:12),field('Quantity (whole Outers)',qty,number:true),field('Rate per Outer (PKR)',rate,number:true),
-       const Text('One product per invoice in this test version.',style:TextStyle(fontSize:12,color:Colors.grey)),
-     ],
-     const SizedBox(height:20),
-     FilledButton(onPressed:()async{
-       final n=name.text.trim();final q=int.tryParse(qty.text.trim());final r=double.tryParse(rate.text.trim());final a=double.tryParse(amount.text.trim());
-       if(['product','customer','supplier','expense'].contains(type)&&n.isEmpty){ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content:Text('Name / category is required')));return;}
-       if(type=='product'&&(q==null||q<0)){ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content:Text('Enter valid whole Outers')));return;}
-       if(type=='expense'&&(a==null||a<=0)){ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content:Text('Enter valid amount')));return;}
-       if(['sale','purchase'].contains(type)&&(party==null||product==null||q==null||q<=0||r==null||r<=0)){ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content:Text('Select party, product and enter valid quantity/rate')));return;}
-       if(type=='product')s.products.add({'name':n,'qty':q!});
-       if(type=='customer')s.customers.add({'name':n,'phone':phone.text.trim()});
-       if(type=='supplier')s.suppliers.add({'name':n,'phone':phone.text.trim()});
-       if(type=='expense')s.expenses.add({'category':n,'amount':a!,'date':DateTime.now().toIso8601String()});
-       if(type=='sale'||type=='purchase'){
-         final p=s.products.firstWhere((e)=>e['name']==product);
-         final available=(p['qty'] as num).toInt();
-         if(type=='sale'&&q!>available){
-           final proceed=await showDialog<bool>(context:ctx,builder:(d)=>AlertDialog(title:const Text('Insufficient stock'),content:Text('Available: $available Outers. Continue with negative stock?'),actions:[TextButton(onPressed:()=>Navigator.pop(d,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(d,true),child:const Text('Continue'))]));
-           if(proceed!=true)return;
-         }
-         p['qty']=available+(type=='sale'?-q!:q!);
-         final rows=type=='sale'?s.sales:s.purchases;
-         rows.add({'no':'${type=='sale'?'SALE':'PUR'}-${(rows.length+1).toString().padLeft(4,'0')}','party':party,'product':product,'qty':q,'rate':r,'total':q!*r!,'date':DateTime.now().toIso8601String()});
-       }
-       await s.persist();
-       if(ctx.mounted)Navigator.pop(ctx);
-     },child:const Padding(padding:EdgeInsets.all(13),child:Text('Save Record'))),
-   ]))))));
+extension StockCount on Store {int stockForProduct(Map<String,dynamic> p)=>totalQty(p);}
+
+class SimplePage extends StatelessWidget {final String title;final VoidCallback? add;final Widget body;const SimplePage({super.key,required this.title,required this.body,this.add});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:Text(title)),floatingActionButton:add==null?null:FloatingActionButton(onPressed:add,child:const Icon(Icons.add)),body:body);}
+class PartyPage extends StatelessWidget {final Store store;final String type;final VoidCallback onAdd;final void Function(Map<String,dynamic>) onPayment,onPdf;const PartyPage({super.key,required this.store,required this.type,required this.onAdd,required this.onPayment,required this.onPdf});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:Text(type=='customer'?'Customers & Outstanding':'Suppliers & Payables')),floatingActionButton:FloatingActionButton(onPressed:onAdd,child:const Icon(Icons.add)),body:AnimatedBuilder(animation:store,builder:(_,__) {final xs=type=='customer'?store.customers:store.suppliers;return ListView(padding:const EdgeInsets.all(12),children:[if(xs.isEmpty)const Padding(padding:EdgeInsets.all(30),child:Text('No parties yet')),for(final p in xs)Card(child:ExpansionTile(title:Text('${p['name']}',style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('Outstanding: ${money(store.balance(type,p['id']))}'),children:[if('${p['phone']??''}'.isNotEmpty)ListTile(title:Text('Phone: ${p['phone']}')),Row(mainAxisAlignment:MainAxisAlignment.spaceEvenly,children:[TextButton.icon(onPressed:()=>onPayment(p),icon:const Icon(Icons.payments_outlined),label:Text(type=='customer'?'Receive':'Pay')),TextButton.icon(onPressed:()=>onPdf(p),icon:const Icon(Icons.picture_as_pdf_outlined),label:const Text('Ledger PDF'))]),const SizedBox(height:8)]))]);}));}
 }
-Widget field(String title,TextEditingController c,{bool number=false})=>Padding(padding:const EdgeInsets.only(bottom:12),child:TextFormField(controller:c,keyboardType:number?const TextInputType.numberWithOptions(decimal:true):TextInputType.text,decoration:InputDecoration(labelText:title,border:const OutlineInputBorder(),contentPadding:const EdgeInsets.symmetric(horizontal:13,vertical:15))));
